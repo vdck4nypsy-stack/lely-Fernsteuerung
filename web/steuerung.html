@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Lely Steuerung v1.0</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #fff; height: 100%; overflow: hidden;
+               font-family: sans-serif; color: #222; touch-action: none; }
+  #topbar { position: fixed; top: 0; left: 0; right: 0; padding: 8px 10px; background: #f0f0f0;
+            border-bottom: 1px solid #ccc; z-index: 20; display: flex; align-items: center;
+            gap: 8px; font-size: 14px; }
+  #topbar select { font-size: 14px; padding: 4px 8px; }
+  #status { padding: 2px 8px; border-radius: 4px; color: #fff; margin-left: auto; }
+  #status.ok { background: #2a8f2a; } #status.err { background: #c0392b; } #status.warn { background: #c89000; }
+  button.small { font-size: 13px; padding: 6px 12px; background: #666; color: #fff; border: none; border-radius: 6px; }
+  #debug { position: fixed; bottom: 6px; right: 6px; background: #000a; color: #0f0; font-size: 12px;
+           padding: 4px 8px; border-radius: 4px; z-index: 30; font-family: monospace; }
+  #wrap { position: absolute; top: 42px; bottom: 0; left: 0; right: 0; background: #fff; }
+  #screen { width: 100%; height: 100%; }
+  #pad { position: absolute; top: 0; left: 0; width: 100%; height: 100%; cursor: crosshair; }
+</style>
+</head>
+<body>
+
+<div id="topbar">
+  <label>Roboter:</label><span style="font-size:11px;color:#999;">v1.0</span>
+  <select id="robotSelect">
+    <option value="r1">Roboter 1</option>
+    <option value="r2">Roboter 2</option>
+  </select>
+  <button class="small" id="wakeBtn">Zeiger wecken</button>
+  <div id="status" class="warn">Verbinde ...</div>
+</div>
+
+<div id="wrap">
+  <div id="screen"></div>
+  <div id="pad"></div>
+</div>
+
+<div id="debug">bereit</div>
+
+<script type="module">
+  import RFB from './core/rfb.js';
+
+  const ROBOTS = {
+    r1: { name: "Roboter 1", esp32Ws: "ws://192.168.178.201:81", vncPort: 6080 },   // <<< IP deines ESP32 fuer Roboter 1 eintragen
+    r2: { name: "Roboter 2", esp32Ws: "ws://192.168.178.202:81", vncPort: 6081 }    // <<< IP deines ESP32 fuer Roboter 2 eintragen
+  };
+  const SCREEN_W = 1024;   // <<< Aufloesung deines Terminals (im RealVNC Viewer nachschauen!)
+  const SCREEN_H = 768;
+  const DRAG_THRESHOLD = 8;
+  const DRAG_SPEED = 1.0;
+
+  const statusEl = document.getElementById('status');
+  const screenEl = document.getElementById('screen');
+  const padEl = document.getElementById('pad');
+  const selectEl = document.getElementById('robotSelect');
+  const wakeBtn = document.getElementById('wakeBtn');
+  const debugEl = document.getElementById('debug');
+  function setStatus(t, c) { statusEl.textContent = t; statusEl.className = c; }
+  function dbg(t) { debugEl.textContent = t; }
+
+  let rfb, ws;
+
+  function connectVnc(key) {
+    if (rfb) { try { rfb.disconnect(); } catch(e){} screenEl.innerHTML = ''; }
+    const wsUrl = `ws://${location.hostname}:${ROBOTS[key].vncPort}/websockify`;
+    rfb = new RFB(screenEl, wsUrl, { credentials: { password: '' } });
+    rfb.viewOnly = true;
+    rfb.scaleViewport = true;
+    rfb.addEventListener('disconnect', () => setStatus(ROBOTS[key].name + ': VNC getrennt', 'err'));
+  }
+
+  function connectEsp32(key) {
+    if (ws) { try { ws.close(); } catch(e){} }
+    ws = new WebSocket(ROBOTS[key].esp32Ws);
+    ws.onopen  = () => setStatus(ROBOTS[key].name + ': verbunden', 'ok');
+    ws.onclose = () => { setStatus(ROBOTS[key].name + ': getrennt...', 'err'); setTimeout(() => { if (selectEl.value === key) connectEsp32(key); }, 2000); };
+    ws.onerror = () => setStatus(ROBOTS[key].name + ': Fehler', 'err');
+  }
+
+  function switchRobot(key) {
+    setStatus('Verbinde ...', 'warn');
+    connectVnc(key);
+    connectEsp32(key);
+  }
+  selectEl.addEventListener('change', () => switchRobot(selectEl.value));
+  wakeBtn.addEventListener('click', () => send({ t: 'wake' }));
+
+  function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+
+  function getCanvasRect() {
+    const canvas = screenEl.querySelector('canvas');
+    if (!canvas) return null;
+    return canvas.getBoundingClientRect();
+  }
+  function toPixel(clientX, clientY) {
+    const rect = getCanvasRect();
+    if (!rect || rect.width === 0 || rect.height === 0) return null;
+    let nx = (clientX - rect.left) / rect.width;
+    let ny = (clientY - rect.top) / rect.height;
+    if (nx < -0.02 || nx > 1.02 || ny < -0.02 || ny > 1.02) return null;
+    nx = Math.max(0, Math.min(1, nx));
+    ny = Math.max(0, Math.min(1, ny));
+    return { px: Math.round(nx * SCREEN_W), py: Math.round(ny * SCREEN_H) };
+  }
+
+  let startPos = null, startClient = null, lastClient = null, dragging = false;
+
+  function onStart(clientX, clientY) {
+    const p = toPixel(clientX, clientY);
+    if (!p) { startPos = null; return; }
+    startPos = p;
+    startClient = { x: clientX, y: clientY };
+    lastClient = { x: clientX, y: clientY };
+    dragging = false;
+  }
+
+  function onMove(clientX, clientY) {
+    if (!startPos) return;
+    const dist = Math.hypot(clientX - startClient.x, clientY - startClient.y);
+    if (!dragging && dist > DRAG_THRESHOLD) {
+      dragging = true;
+      send({ t: 'dragstart', px: startPos.px, py: startPos.py });
+    }
+    if (dragging) {
+      const rect = getCanvasRect();
+      const scaleX = SCREEN_W / rect.width;
+      const scaleY = SCREEN_H / rect.height;
+      const dx = Math.round((clientX - lastClient.x) * scaleX * DRAG_SPEED);
+      const dy = Math.round((clientY - lastClient.y) * scaleY * DRAG_SPEED);
+      if (dx !== 0 || dy !== 0) {
+        send({ t: 'dragmove', dx, dy });
+        lastClient = { x: clientX, y: clientY };
+      }
+    }
+  }
+
+  function onEnd() {
+    if (!startPos) return;
+    if (dragging) {
+      send({ t: 'dragend' });
+      dbg('scroll fertig');
+    } else {
+      send({ t: 'click', px: startPos.px, py: startPos.py });
+      dbg('KLICK px='+startPos.px+' py='+startPos.py);
+    }
+    startPos = null; dragging = false;
+  }
+
+  padEl.addEventListener('mousedown', (e) => { e.preventDefault(); onStart(e.clientX, e.clientY); });
+  window.addEventListener('mousemove', (e) => onMove(e.clientX, e.clientY));
+  window.addEventListener('mouseup', () => onEnd());
+  padEl.addEventListener('touchstart', (e) => { e.preventDefault(); const t=e.touches[0]; onStart(t.clientX, t.clientY); }, { passive:false });
+  padEl.addEventListener('touchmove', (e) => { e.preventDefault(); const t=e.touches[0]; onMove(t.clientX, t.clientY); }, { passive:false });
+  padEl.addEventListener('touchend', (e) => { e.preventDefault(); onEnd(); }, { passive:false });
+
+  switchRobot('r1');
+</script>
+</body>
+</html>

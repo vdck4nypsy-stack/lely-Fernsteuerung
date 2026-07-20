@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Roboter 1 umschalten</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #fff; height: 100%; font-family: sans-serif;
+               color: #222; overflow: hidden; }
+  #status { padding: 10px; text-align: center; font-size: 18px; background: #f0f0f0;
+            border-bottom: 1px solid #ccc; }
+  #status.ok { background: #2a8f2a; color: #fff; }
+  #status.err { background: #c0392b; color: #fff; }
+  #status.warn { background: #c89000; color: #fff; }
+  #screen { width: 100%; height: calc(100% - 44px); }
+</style>
+</head>
+<body>
+
+<div id="status" class="warn">Verbinde und schalte um ...</div>
+<div id="screen"></div>
+
+<script type="module">
+  import RFB from './core/rfb.js';
+
+  // ---------- Einstellungen ----------
+  const ESP32_IP = "192.168.178.201";   // <<< IP deines ESP32 eintragen   
+  const VNC_PORT = 6080;                  // websockify-Port Roboter 1
+  // Position "In/Ausser Betrieb"-Button (unten rechts) bei 1024x768:
+  const CLICK_PX = 985;
+  const CLICK_PY = 731;
+  // -----------------------------------
+
+  const statusEl = document.getElementById('status');
+  const screenEl = document.getElementById('screen');
+  function setStatus(txt, cls) { statusEl.textContent = txt; statusEl.className = cls; }
+
+  // 1) Umschalt-Klick ans ESP32 senden (Absolut: fährt selbst in Ecke + zum Ziel)
+  let ws = new WebSocket("ws://" + ESP32_IP + ":81");
+  ws.onopen = () => {
+    setStatus("Verbunden - schalte um ...", "warn");
+    ws.send(JSON.stringify({ t: "click", px: CLICK_PX, py: CLICK_PY }));
+    setStatus("Umgeschaltet - Live-Bild:", "ok");
+    setTimeout(() => { try { ws.close(); } catch(e) {} }, 800);
+    startVideo();
+  };
+  ws.onerror = () => setStatus("Keine Verbindung zum Roboter-Modul", "err");
+
+  // 2) Nach dem Umschalten das Live-Bild anzeigen
+  function startVideo() {
+    const wsUrl = `ws://${location.hostname}:${VNC_PORT}/websockify`;
+    const rfb = new RFB(screenEl, wsUrl, { credentials: { password: '' } });
+    rfb.viewOnly = true;
+    rfb.scaleViewport = true;
+  }
+</script>
+</body>
+</html>
